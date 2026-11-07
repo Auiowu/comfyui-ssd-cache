@@ -38,6 +38,16 @@ def _request(base: str, path: str, payload=None, method=None):
         return json.loads(body) if body else {}
 
 
+def _wait_store_drain(base: str, timeout: float = 20.0) -> None:
+    """等后台写盘线程把排队的条目写完，否则禁用内存时下一轮会查不到。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        stats = _request(base, "/ssd_cache/stats")
+        if stats["session"].get("stores_pending", 0) == 0:
+            return
+        time.sleep(0.2)
+
+
 def _wait_prompt(base: str, prompt_id: str, timeout: float = 120.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -81,6 +91,18 @@ def main() -> int:
         help="测试用缓存目录（默认沿用当前配置，会污染真实缓存时可指定临时目录）",
     )
     parser.add_argument(
+        "--memory-cache",
+        choices=("on", "off"),
+        default=None,
+        help="本测试是否允许内存/显存缓存（不传则沿用当前配置）",
+    )
+    parser.add_argument(
+        "--memory-cache-mb",
+        type=int,
+        default=None,
+        help="内存/显存缓存上限 MB（0=不限）",
+    )
+    parser.add_argument(
         "--expect",
         choices=("auto", "write", "hit"),
         default="auto",
@@ -107,11 +129,12 @@ def main() -> int:
 
     print("[3] 启用 SSD 缓存")
     target_dir = args.cache_dir or stats["cache_dir"]
-    result = _request(
-        base,
-        "/ssd_cache/configure",
-        {"cache_dir": target_dir, "enabled": True, "max_entry_mb": 0},
-    )
+    payload = {"cache_dir": target_dir, "enabled": True, "max_entry_mb": 0}
+    if args.memory_cache is not None:
+        payload["memory_cache"] = args.memory_cache == "on"
+    if args.memory_cache_mb is not None:
+        payload["memory_cache_mb"] = args.memory_cache_mb
+    result = _request(base, "/ssd_cache/configure", payload)
     print(f"    {result}")
     if not result.get("ok"):
         return 1
@@ -124,6 +147,7 @@ def main() -> int:
         status = history_entry.get("status", {})
         print(f"    prompt_id={prompt_id[:8]} status={status.get('status_str')}")
 
+        _wait_store_drain(base)
         stats = _request(base, "/ssd_cache/stats")
         session = stats["session"]
         written = session["stores"] + session.get("stores_pending", 0)
@@ -136,6 +160,11 @@ def main() -> int:
             f"写入 {written}（排队 {session.get('stores_pending', 0)}）"
             f" 不可缓存 {session['skipped_unsupported']} "
             f"磁盘 {stats['disk']['bytes_human']} / {stats['disk']['entries']} 条"
+        )
+        mem = stats.get("memory") or {}
+        print(
+            f"    内存/显存: {mem.get('bytes_human', '0 B')} / "
+            f"{mem.get('limit_human', '不限')} · {mem.get('entries', 0)} 条"
         )
 
         if args.expect == "write" and round_index == 1 and written < 1:
