@@ -76,6 +76,11 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8189)
     parser.add_argument("--rounds", type=int, default=2)
     parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="测试用缓存目录（默认沿用当前配置，会污染真实缓存时可指定临时目录）",
+    )
+    parser.add_argument(
         "--expect",
         choices=("auto", "write", "hit"),
         default="auto",
@@ -101,10 +106,11 @@ def main() -> int:
     print(f"    enabled={stats['enabled']} dir={stats['cache_dir']} entries={stats['disk']['entries']}")
 
     print("[3] 启用 SSD 缓存")
+    target_dir = args.cache_dir or stats["cache_dir"]
     result = _request(
         base,
         "/ssd_cache/configure",
-        {"cache_dir": stats["cache_dir"], "enabled": True, "max_entry_mb": 0},
+        {"cache_dir": target_dir, "enabled": True, "max_entry_mb": 0},
     )
     print(f"    {result}")
     if not result.get("ok"):
@@ -122,9 +128,13 @@ def main() -> int:
         session = stats["session"]
         written = session["stores"] + session.get("stores_pending", 0)
         print(
-            f"    命中 {session['hits']}/{session['lookups']} "
+            f"    节点: 跳过 {session.get('cached_nodes', 0)} "
+            f"· 实际计算 {session.get('executed_nodes', 0)}"
+        )
+        print(
+            f"    SSD: 命中 {session['hits']}/{session['lookups']} "
             f"写入 {written}（排队 {session.get('stores_pending', 0)}）"
-            f" 跳过 {session['skipped_unsupported']} "
+            f" 不可缓存 {session['skipped_unsupported']} "
             f"磁盘 {stats['disk']['bytes_human']} / {stats['disk']['entries']} 条"
         )
 

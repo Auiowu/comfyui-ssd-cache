@@ -170,9 +170,48 @@ class TestProvider(unittest.TestCase):
         _run(self.provider.on_lookup(_context(key="j" * 64)))
         text = self.provider.format_stats()
         self.assertIn("SSD-Cache", text)
-        self.assertIn("本轮命中", text)
-        self.assertIn("磁盘占用", text)
+        self.assertIn("本轮 SSD", text)
+        self.assertIn("磁盘", text)
         self.assertIn(self.provider.store.cache_dir, text)
+
+    def test_unstable_node_detected_after_repeated_misses(self):
+        ctx_a = _context(node_id="504", class_type="SamplerCustomAdvanced", key="a" * 64)
+        ctx_b = _context(node_id="504", class_type="SamplerCustomAdvanced", key="b" * 64)
+        _run(self.provider.on_lookup(ctx_a))
+        _run(self.provider.on_lookup(ctx_b))
+
+        unstable = self.provider.unstable_nodes()
+        self.assertEqual(len(unstable), 1)
+        self.assertIn("SamplerCustomAdvanced#504", unstable[0])
+        self.assertIn("(2)", unstable[0])
+        self.assertIn("键不稳定", self.provider.format_stats())
+
+    def test_stable_node_not_reported_unstable(self):
+        ctx = _context(node_id="7", class_type="KSampler", key="c" * 64)
+        _run(self.provider.on_lookup(ctx))
+        _run(self.provider.on_lookup(ctx))  # 同一个键 miss 两次 = 稳定
+        self.assertEqual(self.provider.unstable_nodes(), [])
+
+    def test_clear_diagnostics(self):
+        _run(self.provider.on_lookup(_context(node_id="1", key="d" * 64)))
+        _run(self.provider.on_lookup(_context(node_id="1", key="e" * 64)))
+        self.assertTrue(self.provider.unstable_nodes())
+        self.provider.clear_diagnostics()
+        self.assertEqual(self.provider.unstable_nodes(), [])
+
+    def test_node_hit_rate_includes_memory_skipped(self):
+        self.provider.on_prompt_start("p")
+        # 模拟：10 个节点被跳过（其中 4 个来自 SSD），7 个实际执行
+        self.provider.session.cached_node_ids = {str(i) for i in range(10)}
+        self.provider.session.executed_node_ids = {str(i) for i in range(100, 107)}
+        self.provider.session.hits = 4
+        self.assertAlmostEqual(self.provider.session.node_hit_rate, 10 / 17)
+
+        text = self.provider.format_stats()
+        self.assertIn("本轮命中率: 10/17 (58.8%)", text)
+        self.assertIn("SSD 恢复 4", text)
+        self.assertIn("内存/显存 6", text)
+        self.assertIn("实际计算 7", text)
 
 
 if __name__ == "__main__":

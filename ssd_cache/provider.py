@@ -54,10 +54,14 @@ class CacheStats:
     skipped_too_large: int = 0
     bytes_written: int = 0
     started: float = field(default_factory=time.time)
-    #: 本轮被 ComfyUI 内存缓存直接跳过的节点（来自 execution_cached 事件）
+    #: 本轮被 ComfyUI 内存/显存缓存直接跳过的节点（来自 execution_cached 事件）
     cached_node_ids: set = field(default_factory=set)
     #: 本轮真正执行的节点（来自 executing 事件）
     executed_node_ids: set = field(default_factory=set)
+    #: 累计跳过的节点数（on_prompt_end 时汇总）
+    cached_node_count: int = 0
+    #: 累计实际执行的节点数
+    executed_node_count: int = 0
 
     def reset(self, prompt_id: str = "") -> None:
         self.prompt_id = prompt_id
@@ -77,6 +81,12 @@ class CacheStats:
     @property
     def hit_rate(self) -> float:
         return (self.hits / self.lookups) if self.lookups else 0.0
+
+    @property
+    def node_hit_rate(self) -> float:
+        """总命中率：跳过计算的节点 / 本轮涉及的全部节点。"""
+        total = len(self.cached_node_ids) + len(self.executed_node_ids)
+        return (len(self.cached_node_ids) / total) if total else 0.0
 
     @property
     def elapsed(self) -> float:
@@ -389,6 +399,11 @@ class SSDCacheProvider(CacheProvider):
 
     def on_prompt_end(self, prompt_id: str) -> None:
         stats = self.session
+        # 把本轮的节点跳过/执行数累加进 total（用于累计命中率）
+        with self._stats_lock:
+            self.total.cached_node_count += len(stats.cached_node_ids)
+            self.total.executed_node_count += len(stats.executed_node_ids)
+
         if stats.lookups == 0 and stats.stores == 0 and stats.stores_pending == 0:
             return
         log.info(
@@ -426,6 +441,7 @@ class SSDCacheProvider(CacheProvider):
                 "elapsed": self.session.elapsed,
                 "cached_nodes": len(self.session.cached_node_ids),
                 "executed_nodes": len(self.session.executed_node_ids),
+                "node_hit_rate": self.session.node_hit_rate,
             },
             "total": {
                 "lookups": self.total.lookups,
@@ -438,6 +454,8 @@ class SSDCacheProvider(CacheProvider):
                 "skipped_unsupported": self.total.skipped_unsupported,
                 "skipped_too_large": self.total.skipped_too_large,
                 "bytes_written": self.total.bytes_written,
+                "cached_nodes": self.total.cached_node_count,
+                "executed_nodes": self.total.executed_node_count,
             },
             "disk": {
                 "bytes": size,
@@ -465,11 +483,24 @@ class SSDCacheProvider(CacheProvider):
         cached = session.get("cached_nodes", 0)
         executed = session.get("executed_nodes", 0)
         if cached or executed:
-            ssd_restored = session["hits"]
+            total_nodes = cached + executed
+            ssd_restored = min(session["hits"], cached)
             memory_only = max(0, cached - ssd_restored)
             lines.append(
-                f"本轮节点: 跳过 {cached}（SSD 恢复 {ssd_restored} / 内存已有 {memory_only}）"
+                f"本轮命中率: {cached}/{total_nodes} "
+                f"({session.get('node_hit_rate', 0.0) * 100:.1f}%)"
+                f" = SSD 恢复 {ssd_restored} + 内存/显存 {memory_only}"
                 f" · 实际计算 {executed}"
+            )
+
+        total_cached = total.get("cached_nodes", 0)
+        total_executed = total.get("executed_nodes", 0)
+        if total_cached or total_executed:
+            total_nodes = total_cached + total_executed
+            rate = (total_cached / total_nodes * 100) if total_nodes else 0.0
+            lines.append(
+                f"累计命中率: {total_cached}/{total_nodes} ({rate:.1f}%)"
+                f" · SSD 恢复 {total['hits']} · 实际计算 {total_executed}"
             )
 
         lines.append(
