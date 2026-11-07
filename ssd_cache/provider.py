@@ -54,6 +54,10 @@ class CacheStats:
     skipped_too_large: int = 0
     bytes_written: int = 0
     started: float = field(default_factory=time.time)
+    #: 本轮被 ComfyUI 内存缓存直接跳过的节点（来自 execution_cached 事件）
+    cached_node_ids: set = field(default_factory=set)
+    #: 本轮真正执行的节点（来自 executing 事件）
+    executed_node_ids: set = field(default_factory=set)
 
     def reset(self, prompt_id: str = "") -> None:
         self.prompt_id = prompt_id
@@ -67,6 +71,8 @@ class CacheStats:
         self.skipped_too_large = 0
         self.bytes_written = 0
         self.started = time.time()
+        self.cached_node_ids = set()
+        self.executed_node_ids = set()
 
     @property
     def hit_rate(self) -> float:
@@ -95,6 +101,11 @@ class SSDCacheProvider(CacheProvider):
         self._pending_futures: set = set()
         self._write_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         self._read_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+        # 键稳定性诊断：同一节点在多次 miss 中出现过哪些不同的 cache_key_hash。
+        # 跨 prompt 保留，这样用户连跑两次后就能看到是哪个节点在变。
+        self._key_history: Dict[str, Dict[str, Any]] = {}
+        self._hooked = False
 
     # -------------------------------------------------------------- 配置
     def configure(self, cache_dir: str, enabled: bool, max_entry_mb: int) -> bool:
@@ -139,6 +150,79 @@ class SSDCacheProvider(CacheProvider):
     def _forget_future(self, future) -> None:
         with self._futures_lock:
             self._pending_futures.discard(future)
+
+    # -------------------------------------------------------------- 执行统计钩子
+    def _install_hooks(self) -> None:
+        """挂接 PromptServer.send_sync，记录本轮「跳过 / 实际执行」的节点。
+
+        ComfyUI 的 ``execution_cached`` 事件列出被内存缓存直接跳过的节点，
+        ``executing`` 事件则每个真正要执行的节点发一次。有了这两个数字，
+        Stats 才能区分「内存命中」「SSD 恢复」「实际计算」。
+        """
+        if self._hooked:
+            return
+        try:
+            from server import PromptServer
+
+            server = getattr(PromptServer, "instance", None)
+            if server is None:
+                return
+            if getattr(server, "_ssd_cache_hooked", False):
+                self._hooked = True
+                return
+
+            original = server.send_sync
+            provider = self
+
+            def _send_sync(event, data, sid=None):
+                try:
+                    if isinstance(data, dict):
+                        if event == "execution_cached":
+                            nodes = data.get("nodes") or []
+                            with provider._stats_lock:
+                                provider.session.cached_node_ids = {str(n) for n in nodes}
+                        elif event == "executing":
+                            node_id = data.get("node")
+                            if node_id is not None:
+                                with provider._stats_lock:
+                                    provider.session.executed_node_ids.add(str(node_id))
+                except Exception:  # noqa: BLE001 - 统计失败绝不能影响执行
+                    pass
+                return original(event, data, sid)
+
+            server.send_sync = _send_sync
+            server._ssd_cache_hooked = True
+            self._hooked = True
+            log.debug("SSD-Cache: 已挂接执行统计钩子")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("SSD-Cache: 无法挂接执行统计钩子: %s", exc)
+
+    # -------------------------------------------------------------- 键稳定性诊断
+    def _record_miss_key(self, context: CacheContext) -> None:
+        label = f"{context.class_type}#{context.node_id}"
+        with self._stats_lock:
+            entry = self._key_history.get(label)
+            if entry is None:
+                entry = {"hashes": set(), "last": 0.0}
+                self._key_history[label] = entry
+            if len(entry["hashes"]) < 8:
+                entry["hashes"].add(context.cache_key_hash)
+            entry["last"] = time.time()
+
+    def unstable_nodes(self, min_distinct: int = 2, limit: int = 5) -> list:
+        """返回反复 miss 且每次键都不同的节点，如 ``SamplerCustomAdvanced#504(3)``。"""
+        rows = []
+        with self._stats_lock:
+            for label, entry in self._key_history.items():
+                distinct = len(entry["hashes"])
+                if distinct >= min_distinct:
+                    rows.append((distinct, entry["last"], label))
+        rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        return [f"{label}({distinct})" for distinct, _last, label in rows[:limit]]
+
+    def clear_diagnostics(self) -> None:
+        with self._stats_lock:
+            self._key_history.clear()
 
     def flush(self, timeout: Optional[float] = None) -> bool:
         """等待所有排队中的写盘任务结束（测试 / 关停时使用）。"""
@@ -242,6 +326,7 @@ class SSDCacheProvider(CacheProvider):
                 self.total.hits += 1
 
         if payload is None:
+            self._record_miss_key(context)
             return None
 
         log.debug("SSD-Cache: 命中 %s (%s)", context.class_type, context.cache_key_hash[:12])
@@ -298,6 +383,7 @@ class SSDCacheProvider(CacheProvider):
     # -------------------------------------------------------------- 生命周期
     def on_prompt_start(self, prompt_id: str) -> None:
         self.session.reset(prompt_id)
+        self._install_hooks()
         # 注意：这里刻意不改动 self.enabled —— 它来自持久化配置 / 上一次 Enable 节点，
         # 这样 ComfyUI 在 prompt 开始时的批量预取也能直接命中 SSD。
 
@@ -338,6 +424,8 @@ class SSDCacheProvider(CacheProvider):
                 "skipped_too_large": self.session.skipped_too_large,
                 "bytes_written": self.session.bytes_written,
                 "elapsed": self.session.elapsed,
+                "cached_nodes": len(self.session.cached_node_ids),
+                "executed_nodes": len(self.session.executed_node_ids),
             },
             "total": {
                 "lookups": self.total.lookups,
@@ -373,17 +461,35 @@ class SSDCacheProvider(CacheProvider):
         lines = []
         state = "已启用" if snap["enabled"] else "未启用"
         lines.append(f"SSD-Cache: {state}")
+
+        cached = session.get("cached_nodes", 0)
+        executed = session.get("executed_nodes", 0)
+        if cached or executed:
+            ssd_restored = session["hits"]
+            memory_only = max(0, cached - ssd_restored)
+            lines.append(
+                f"本轮节点: 跳过 {cached}（SSD 恢复 {ssd_restored} / 内存已有 {memory_only}）"
+                f" · 实际计算 {executed}"
+            )
+
         lines.append(
-            f"本轮命中: {session['hits']}/{session['lookups']} "
+            f"本轮 SSD: {session['hits']}/{session['lookups']} 命中 "
             f"({session['hit_rate'] * 100:.1f}%) · 写入 {_write_text(session)} "
-            f"· 跳过 {session['skipped_unsupported'] + session['skipped_too_large']}"
+            f"· 不可缓存 {session['skipped_unsupported'] + session['skipped_too_large']}"
         )
         lines.append(
-            f"累计命中: {total['hits']}/{total['lookups']} "
+            f"累计 SSD: {total['hits']}/{total['lookups']} 命中 "
             f"({total['hit_rate'] * 100:.1f}%) · 写入 {_write_text(total)}"
         )
-        lines.append(f"磁盘占用: {disk['bytes_human']} · {disk['entries']} 个条目")
-        lines.append(f"目录: {snap['cache_dir']}")
+        lines.append(f"磁盘: {disk['bytes_human']} · {disk['entries']} 条 | 目录: {snap['cache_dir']}")
+
+        unstable = self.unstable_nodes()
+        if unstable:
+            lines.append("⚠ 键不稳定（同一节点每次键不同）: " + ", ".join(unstable))
+            lines.append("  常见原因：随机种子（RandomNoise / KSampler 的 control_after_generate）、时间戳类节点")
+        elif session["lookups"] and session["hits"] == 0 and not cached:
+            lines.append("提示：内存命中的节点不会查询 SSD，验证 SSD 命中请重启 ComfyUI 后再跑")
+
         return "\n".join(lines)
 
 
