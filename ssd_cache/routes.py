@@ -66,13 +66,23 @@ def register_routes() -> bool:
         cache_dir = payload.get("cache_dir") or provider.store.cache_dir
         enabled = bool(payload.get("enabled", provider.enabled))
         max_entry_mb = int(payload.get("max_entry_mb", provider.config.max_entry_mb) or 0)
-        ok = provider.configure(cache_dir, enabled, max_entry_mb)
+        memory_cache = bool(payload.get("memory_cache", provider.memory_cache_enabled))
+        memory_cache_mb = int(payload.get("memory_cache_mb", provider.config.memory_cache_mb) or 0)
+        ok = provider.configure(
+            cache_dir,
+            enabled,
+            max_entry_mb,
+            memory_cache=memory_cache,
+            memory_cache_mb=memory_cache_mb,
+        )
         return web.json_response(
             {
                 "ok": ok,
                 "enabled": provider.enabled,
                 "cache_dir": provider.store.cache_dir,
                 "max_entry_mb": provider.config.max_entry_mb,
+                "memory_cache": provider.memory_cache_enabled,
+                "memory_cache_mb": provider.config.memory_cache_mb,
             }
         )
 

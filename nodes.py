@@ -46,6 +46,25 @@ class SSDCacheEnable:
                         "tooltip": "单条缓存的大小上限（MB），0 表示不限制",
                     },
                 ),
+                "memory_cache": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "label_on": "启用",
+                        "label_off": "禁用",
+                        "tooltip": "关闭后节点结果不留在内存/显存，只写 SSD（省内存但每次都要读盘）",
+                    },
+                ),
+                "memory_cache_mb": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 102400,
+                        "step": 256,
+                        "tooltip": "内存/显存缓存上限（MB）。0 表示不限制；超出后按最久未使用淘汰，结果仍可从 SSD 取回",
+                    },
+                ),
             }
         }
 
@@ -53,11 +72,13 @@ class SSDCacheEnable:
     RETURN_NAMES = ("model",)
     FUNCTION = "apply"
     CATEGORY = "SSD-Cache"
-    DESCRIPTION = "放在 UNet 加载节点之后，启用 SSD 缓存并透传 MODEL。"
+    DESCRIPTION = "放在 UNet 加载节点之后，启用 SSD 缓存并透传 MODEL；可控制内存/显存缓存开关与上限。"
 
-    def apply(self, model, cache_dir, enable, max_entry_mb):
+    def apply(self, model, cache_dir, enable, max_entry_mb, memory_cache=True, memory_cache_mb=0):
         provider = get_provider()
-        ok = provider.configure(cache_dir, enable, max_entry_mb)
+        ok = provider.configure(
+            cache_dir, enable, max_entry_mb, memory_cache=memory_cache, memory_cache_mb=memory_cache_mb
+        )
         if not ok:
             log.error("SSD-Cache: 启用失败，缓存目录不可用: %s", cache_dir)
         return (model,)
