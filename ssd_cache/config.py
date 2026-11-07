@@ -25,12 +25,18 @@ class SSDCacheConfig:
     cache_dir: str = DEFAULT_CACHE_DIR
     enabled: bool = False
     max_entry_mb: int = 0
+    #: 是否允许把节点结果保留在内存/显存中（False 时只写 SSD）
+    memory_cache: bool = True
+    #: 内存/显存缓存上限（MB），0 表示不限制
+    memory_cache_mb: int = 0
 
     def to_dict(self) -> dict:
         return {
             "cache_dir": self.cache_dir,
             "enabled": self.enabled,
             "max_entry_mb": self.max_entry_mb,
+            "memory_cache": self.memory_cache,
+            "memory_cache_mb": self.memory_cache_mb,
         }
 
     @classmethod
@@ -50,6 +56,14 @@ class SSDCacheConfig:
         max_entry_mb = data.get("max_entry_mb")
         if isinstance(max_entry_mb, (int, float)) and max_entry_mb >= 0:
             cfg.max_entry_mb = int(max_entry_mb)
+
+        memory_cache = data.get("memory_cache")
+        if isinstance(memory_cache, bool):
+            cfg.memory_cache = memory_cache
+
+        memory_cache_mb = data.get("memory_cache_mb")
+        if isinstance(memory_cache_mb, (int, float)) and memory_cache_mb >= 0:
+            cfg.memory_cache_mb = int(memory_cache_mb)
 
         return cfg
 

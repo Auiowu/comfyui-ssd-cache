@@ -13,12 +13,23 @@ import logging
 log = logging.getLogger("SSD-Cache")
 
 # 注册 CacheProvider（必须在 ComfyUI 执行工作流之前完成）
+_provider = None
 try:
     from .ssd_cache.provider import get_provider
 
-    get_provider()
+    _provider = get_provider()
 except Exception as exc:  # noqa: BLE001 - 不允许插件加载失败拖垮 ComfyUI
     log.exception("SSD-Cache: 初始化失败: %s", exc)
+
+# 接管 ComfyUI 的缓存层（只 patch 运行时对象，不改官方源码）：
+# 必须在 PromptExecutor 创建之前完成，custom node 加载阶段正好满足。
+if _provider is not None:
+    try:
+        from .ssd_cache.memory_cache import install_cache_override
+
+        install_cache_override(_provider)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("SSD-Cache: 缓存层接管失败，沿用 ComfyUI 原实现: %s", exc)
 
 # HTTP API（PromptServer 未就绪时静默跳过）
 try:

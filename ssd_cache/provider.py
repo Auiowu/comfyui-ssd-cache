@@ -101,6 +101,11 @@ class SSDCacheProvider(CacheProvider):
         self.store = SSDCacheStore(self.config.cache_dir)
         self.enabled: bool = self.config.enabled
         self.max_entry_bytes: int = max(0, int(self.config.max_entry_mb)) * 1024 * 1024
+        #: 是否允许节点结果保留在内存/显存中
+        self.memory_cache_enabled: bool = bool(self.config.memory_cache)
+        #: 内存/显存缓存上限（字节），0 = 不限
+        self.memory_cache_max_bytes: int = max(0, int(self.config.memory_cache_mb)) * 1024 * 1024
+        self._memory_cache = None
 
         self.session = CacheStats()
         self.total = CacheStats()
@@ -118,8 +123,15 @@ class SSDCacheProvider(CacheProvider):
         self._hooked = False
 
     # -------------------------------------------------------------- 配置
-    def configure(self, cache_dir: str, enabled: bool, max_entry_mb: int) -> bool:
-        """由 Enable 节点调用：切换目录 / 开关 / 单条上限，并持久化。"""
+    def configure(
+        self,
+        cache_dir: str,
+        enabled: bool,
+        max_entry_mb: int,
+        memory_cache: bool = True,
+        memory_cache_mb: int = 0,
+    ) -> bool:
+        """由 Enable 节点调用：切换目录 / 开关 / 单条上限 / 内存上限，并持久化。"""
         cache_dir = os.path.abspath(os.path.expanduser(str(cache_dir or DEFAULT_CACHE_DIR)))
         try:
             self.store.set_dir(cache_dir)
@@ -130,17 +142,53 @@ class SSDCacheProvider(CacheProvider):
 
         self.enabled = bool(enabled)
         self.max_entry_bytes = max(0, int(max_entry_mb)) * 1024 * 1024
+        self.memory_cache_enabled = bool(memory_cache)
+        self.memory_cache_max_bytes = max(0, int(memory_cache_mb)) * 1024 * 1024
+
         self.config.cache_dir = cache_dir
         self.config.enabled = bool(enabled)
         self.config.max_entry_mb = max(0, int(max_entry_mb))
+        self.config.memory_cache = bool(memory_cache)
+        self.config.memory_cache_mb = max(0, int(memory_cache_mb))
         save_config(self.config)
+
         log.info(
-            "SSD-Cache: %s，目录=%s，单条上限=%s",
+            "SSD-Cache: %s，目录=%s，单条上限=%s，内存缓存=%s",
             "已启用" if enabled else "已禁用",
             cache_dir,
             "不限" if self.max_entry_bytes == 0 else format_bytes(self.max_entry_bytes),
+            (
+                "不限" if self.memory_cache_max_bytes == 0
+                else format_bytes(self.memory_cache_max_bytes)
+            )
+            if self.memory_cache_enabled
+            else "关闭",
         )
         return True
+
+    def attach_memory_cache(self, cache) -> None:
+        """由缓存层 patch 回调，保存当前内存缓存实例用于统计。"""
+        self._memory_cache = cache
+
+    def memory_stats(self) -> Dict[str, Any]:
+        cache = self._memory_cache
+        if cache is None:
+            return {
+                "enabled": self.memory_cache_enabled,
+                "bytes": 0,
+                "bytes_human": "0 B",
+                "entries": 0,
+                "limit_bytes": self.memory_cache_max_bytes,
+                "limit_human": "不限" if self.memory_cache_max_bytes == 0 else format_bytes(self.memory_cache_max_bytes),
+            }
+        return {
+            "enabled": self.memory_cache_enabled,
+            "bytes": cache.memory_bytes,
+            "bytes_human": format_bytes(cache.memory_bytes),
+            "entries": cache.memory_entries,
+            "limit_bytes": self.memory_cache_max_bytes,
+            "limit_human": "不限" if self.memory_cache_max_bytes == 0 else format_bytes(self.memory_cache_max_bytes),
+        }
 
     # -------------------------------------------------------------- 线程池
     def _write_executor(self) -> concurrent.futures.ThreadPoolExecutor:
@@ -462,6 +510,7 @@ class SSDCacheProvider(CacheProvider):
                 "bytes_human": format_bytes(size),
                 "entries": count,
             },
+            "memory": self.memory_stats(),
         }
 
     def format_stats(self) -> str:
@@ -513,6 +562,15 @@ class SSDCacheProvider(CacheProvider):
             f"({total['hit_rate'] * 100:.1f}%) · 写入 {_write_text(total)}"
         )
         lines.append(f"磁盘: {disk['bytes_human']} · {disk['entries']} 条 | 目录: {snap['cache_dir']}")
+
+        memory = snap.get("memory") or {}
+        if memory.get("enabled"):
+            lines.append(
+                f"内存/显存: {memory.get('bytes_human', '0 B')} / "
+                f"{memory.get('limit_human', '不限')} · {memory.get('entries', 0)} 条"
+            )
+        else:
+            lines.append("内存/显存: 已关闭（只写 SSD）")
 
         unstable = self.unstable_nodes()
         if unstable:
