@@ -26,7 +26,12 @@ class SSDCacheEnable:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
+                "value": (
+                    "*",
+                    {
+                        "tooltip": "接任意节点的输出，原样透传；可以放在工作流任意位置",
+                    },
+                ),
                 "cache_dir": (
                     "STRING",
                     {
@@ -68,20 +73,20 @@ class SSDCacheEnable:
             }
         }
 
-    RETURN_TYPES = ("MODEL",)
-    RETURN_NAMES = ("model",)
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("value",)
     FUNCTION = "apply"
     CATEGORY = "SSD-Cache"
-    DESCRIPTION = "放在 UNet 加载节点之后，启用 SSD 缓存并透传 MODEL；可控制内存/显存缓存开关与上限。"
+    DESCRIPTION = "接任意数据并原样透传，用于启用本工作流的 SSD 缓存；可放在工作流任意位置。"
 
-    def apply(self, model, cache_dir, enable, max_entry_mb, memory_cache=True, memory_cache_mb=0):
+    def apply(self, value, cache_dir, enable, max_entry_mb, memory_cache=True, memory_cache_mb=0):
         provider = get_provider()
         ok = provider.configure(
             cache_dir, enable, max_entry_mb, memory_cache=memory_cache, memory_cache_mb=memory_cache_mb
         )
         if not ok:
             log.error("SSD-Cache: 启用失败，缓存目录不可用: %s", cache_dir)
-        return (model,)
+        return (value,)
 
 
 class SSDCacheStats:
