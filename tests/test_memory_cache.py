@@ -148,5 +148,52 @@ class TestMemoryCache(unittest.TestCase):
         self.assertEqual(cache.memory_limit_bytes, 64)
 
 
+class TestCacheScopeSwitch(unittest.TestCase):
+    """没有 Enable 节点时必须回到 ComfyUI 官方缓存层。"""
+
+    def _executor(self):
+        from ssd_cache.memory_cache import apply_cache_scope  # noqa: F401
+
+        class Caches:
+            def __init__(self):
+                self.objects = object()
+                self._ssd_outputs = "ssd-layer"
+                self._official_outputs = "official-layer"
+                self.outputs = self._official_outputs
+                self.all = None
+
+        class Executor:
+            def __init__(self):
+                self.caches = Caches()
+
+        return Executor()
+
+    def test_switch_to_ssd(self):
+        from ssd_cache.memory_cache import apply_cache_scope
+
+        executor = self._executor()
+        provider = type("P", (), {"active_cache_kind": None})()
+        self.assertTrue(apply_cache_scope(executor, True, provider))
+        self.assertEqual(executor.caches.outputs, "ssd-layer")
+        self.assertEqual(provider.active_cache_kind, "ssd")
+
+    def test_switch_back_to_official(self):
+        from ssd_cache.memory_cache import apply_cache_scope
+
+        executor = self._executor()
+        provider = type("P", (), {"active_cache_kind": None})()
+        apply_cache_scope(executor, True, provider)
+        self.assertTrue(apply_cache_scope(executor, False, provider))
+        self.assertEqual(executor.caches.outputs, "official-layer")
+        self.assertEqual(provider.active_cache_kind, "official")
+
+    def test_no_cache_set_is_safe(self):
+        from ssd_cache.memory_cache import apply_cache_scope
+
+        provider = type("P", (), {"active_cache_kind": None})()
+        executor = type("E", (), {})()
+        self.assertFalse(apply_cache_scope(executor, True, provider))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
