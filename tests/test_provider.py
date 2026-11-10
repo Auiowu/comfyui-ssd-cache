@@ -214,5 +214,57 @@ class TestProvider(unittest.TestCase):
         self.assertIn("实际计算 7", text)
 
 
+    def test_begin_prompt_without_enable_node_disables(self):
+        self.provider.enabled = True
+        result = self.provider.begin_prompt({"1": {"class_type": "KSampler", "inputs": {}}})
+        self.assertFalse(result)
+        self.assertFalse(self.provider.enabled)
+
+    def test_begin_prompt_with_enable_node_enables(self):
+        self.provider.enabled = False
+        prompt = {
+            "1": {
+                "class_type": "SSDCacheEnable",
+                "inputs": {
+                    "cache_dir": self.provider.store.cache_dir,
+                    "enable": True,
+                    "max_entry_mb": 0,
+                    "memory_cache": True,
+                    "memory_cache_mb": 0,
+                },
+            }
+        }
+        self.assertTrue(self.provider.begin_prompt(prompt))
+        self.assertTrue(self.provider.enabled)
+
+    def test_begin_prompt_respects_node_disabled(self):
+        self.provider.enabled = True
+        prompt = {"1": {"class_type": "SSDCacheEnable", "inputs": {"enable": False}}}
+        self.assertFalse(self.provider.begin_prompt(prompt))
+        self.assertFalse(self.provider.enabled)
+
+    def test_begin_prompt_applies_memory_settings(self):
+        prompt = {
+            "1": {
+                "class_type": "SSDCacheEnable",
+                "inputs": {"enable": True, "memory_cache": False, "memory_cache_mb": 512},
+            }
+        }
+        self.provider.begin_prompt(prompt)
+        self.assertFalse(self.provider.memory_cache_enabled)
+        self.assertEqual(self.provider.memory_cache_max_bytes, 512 * 1024 * 1024)
+
+    def test_begin_prompt_ignores_linked_inputs(self):
+        self.provider.enabled = True
+        prompt = {
+            "1": {
+                "class_type": "SSDCacheEnable",
+                "inputs": {"enable": ["2", 0], "cache_dir": ["3", 0]},
+            }
+        }
+        # 链接输入无法静态求值，回退到持久化配置（fixture 里 enabled=True）
+        self.assertTrue(self.provider.begin_prompt(prompt))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
