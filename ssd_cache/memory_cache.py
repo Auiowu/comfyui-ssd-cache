@@ -193,6 +193,38 @@ class SSDMemoryCache(HierarchicalCache):
         return self._limit()
 
 
+def install_prompt_scope_patch(provider) -> bool:
+    """让「是否启用缓存」按工作流作用域生效。
+
+    每个 prompt 开始前检查它是否包含 ``SSDCacheEnable`` 节点：
+    不包含就禁用缓存，包含才启用。这样不会因为上一次运行启用过，
+    就把缓存放给所有工作流。
+    """
+    try:
+        import execution
+    except Exception as exc:  # noqa: BLE001
+        log.debug("SSD-Cache: 无法导入 execution，跳过作用域 patch: %s", exc)
+        return False
+
+    executor_cls = getattr(execution, "PromptExecutor", None)
+    if executor_cls is None or getattr(executor_cls, "_ssd_cache_prompt_patched", False):
+        return getattr(executor_cls, "_ssd_cache_prompt_patched", False)
+
+    original = executor_cls.execute_async
+
+    async def patched(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+        try:
+            provider.begin_prompt(prompt)
+        except Exception as exc:  # noqa: BLE001 - 判定失败时不影响执行
+            log.warning("SSD-Cache: 工作流作用域判定失败: %s", exc)
+        return await original(self, prompt, prompt_id, extra_data, execute_outputs)
+
+    executor_cls.execute_async = patched
+    executor_cls._ssd_cache_prompt_patched = True
+    log.info("SSD-Cache: 缓存启用改为按工作流作用域判定（未放 Enable 节点则不缓存）")
+    return True
+
+
 def install_cache_override(provider) -> bool:
     """把 ComfyUI 的 ``CacheSet.outputs`` 替换成 :class:`SSDMemoryCache`。
 

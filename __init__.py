@@ -25,9 +25,11 @@ except Exception as exc:  # noqa: BLE001 - 不允许插件加载失败拖垮 Com
 # 必须在 PromptExecutor 创建之前完成，custom node 加载阶段正好满足。
 if _provider is not None:
     try:
-        from .ssd_cache.memory_cache import install_cache_override
+        from .ssd_cache.memory_cache import install_cache_override, install_prompt_scope_patch
 
         install_cache_override(_provider)
+        # 让「是否启用」按工作流作用域判定：没放 Enable 节点的工作流完全不缓存
+        install_prompt_scope_patch(_provider)
     except Exception as exc:  # noqa: BLE001
         log.warning("SSD-Cache: 缓存层接管失败，沿用 ComfyUI 原实现: %s", exc)
 
