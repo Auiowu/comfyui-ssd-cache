@@ -16,7 +16,33 @@ _COMFY_ROOT = os.environ.get(
 if os.path.isdir(_COMFY_ROOT) and _COMFY_ROOT not in sys.path:
     sys.path.insert(0, _COMFY_ROOT)
 
-from ssd_cache.blank_image import BLANK_GRAY, CreateBlankImage, compute_blank_size  # noqa: E402
+from ssd_cache.blank_image import (  # noqa: E402
+    BLANK_GRAY,
+    CreateBlankImage,
+    compute_blank_size,
+    parse_hex_color,
+    resolve_color,
+)
+
+
+class TestColor(unittest.TestCase):
+    def test_hex_full(self):
+        self.assertEqual(parse_hex_color("#ff0000"), (255, 0, 0))
+        self.assertEqual(parse_hex_color("00ff00"), (0, 255, 0))
+
+    def test_hex_short(self):
+        self.assertEqual(parse_hex_color("#f00"), (255, 0, 0))
+        self.assertEqual(parse_hex_color("#0f0"), (0, 255, 0))
+
+    def test_hex_invalid_falls_back_to_gray(self):
+        self.assertEqual(parse_hex_color("nope"), (127, 127, 127))
+        self.assertEqual(parse_hex_color(""), (127, 127, 127))
+
+    def test_rgb_mode_clamps(self):
+        self.assertEqual(resolve_color("RGB", "#000000", 300, -5, 128), (255, 0, 128))
+
+    def test_hex_mode_ignores_rgb(self):
+        self.assertEqual(resolve_color("十六进制 (Hex)", "#123456", 0, 0, 0), (18, 52, 86))
 
 
 class TestComputeSize(unittest.TestCase):
@@ -75,6 +101,21 @@ class TestCreateBlankImage(unittest.TestCase):
         image, = CreateBlankImage().create(False, 64, 64, "1:1 (Square)", 1.0, 8)
         self.assertEqual(image.dtype, __import__("torch").float32)
         self.assertEqual(tuple(image.shape), (1, 64, 64, 3))
+
+    def test_custom_color_rgb(self):
+        image, = CreateBlankImage().create(
+            False, 8, 8, "1:1 (Square)", 1.0, 8,
+            "RGB", "#000000", 255, 128, 0,
+        )
+        self.assertAlmostEqual(float(image[0, 0, 0, 0]), 1.0, places=5)
+        self.assertAlmostEqual(float(image[0, 0, 0, 1]), 128 / 255.0, places=5)
+        self.assertAlmostEqual(float(image[0, 0, 0, 2]), 0.0, places=5)
+
+    def test_custom_color_hex(self):
+        image, = CreateBlankImage().create(
+            False, 8, 8, "1:1 (Square)", 1.0, 8, "十六进制 (Hex)", "#00ff00", 0, 0, 0,
+        )
+        self.assertEqual(tuple(image[0, 0, 0]), (0.0, 1.0, 0.0))
 
 
 if __name__ == "__main__":
