@@ -1,10 +1,11 @@
 """ComfyUI 节点定义。
 
-三个节点：
+四个节点：
 
-* ``SSDCacheEnable``  —— 放在 UNet 加载节点之后，透传 MODEL，同时启用 SSD 缓存。
-* ``SSDCacheStats``   —— 可选，放在工作流末端显示缓存命中率。
-* ``SSDCacheClear``   —— 可选，手动清理缓存目录（默认不执行，必须勾选 confirm）。
+* ``SSDCacheEnable``   —— 接任意数据透传，启用本工作流的 SSD 缓存。
+* ``SSDCacheStats``    —— 可选，放在工作流末端显示缓存命中率。
+* ``SSDCacheClear``    —— 可选，手动清理缓存目录（默认不执行，必须勾选 confirm）。
+* ``CreateBlankImage`` —— 生成指定分辨率的中灰（#7f7f7f）空白图片。
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import logging
 import time
 
+from .ssd_cache.blank_image import CreateBlankImage
 from .ssd_cache.config import DEFAULT_CACHE_DIR
 from .ssd_cache.provider import get_provider
 from .ssd_cache.store import format_bytes
@@ -189,10 +191,12 @@ NODE_CLASS_MAPPINGS = {
     "SSDCacheEnable": SSDCacheEnable,
     "SSDCacheStats": SSDCacheStats,
     "SSDCacheClear": SSDCacheClear,
+    "CreateBlankImage": CreateBlankImage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "SSDCacheEnable": "SSD Cache Enable（UNet 后）",
+    "SSDCacheEnable": "SSD Cache Enable（工作流开关）",
     "SSDCacheStats": "SSD Cache Stats（命中率）",
     "SSDCacheClear": "SSD Cache Clear（手动清理）",
+    "CreateBlankImage": "创建空白图片",
 }
