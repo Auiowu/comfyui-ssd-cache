@@ -193,6 +193,26 @@ class SSDMemoryCache(HierarchicalCache):
         return self._limit()
 
 
+def apply_cache_scope(executor, enabled: bool, provider) -> bool:
+    """按本次工作流是否启用，在「SSD 缓存层」和「ComfyUI 官方缓存层」之间切换。
+
+    没有 Enable 节点时用官方原版缓存（RAMPressure/LRU/... 原样工作），
+    有 Enable 节点时才切到 :class:`SSDMemoryCache`。
+    """
+    caches = getattr(executor, "caches", None)
+    if caches is None:
+        return False
+    ssd = getattr(caches, "_ssd_outputs", None)
+    official = getattr(caches, "_official_outputs", None)
+    if ssd is None or official is None:
+        return False
+
+    caches.outputs = ssd if enabled else official
+    caches.all = [caches.outputs, caches.objects]
+    provider.active_cache_kind = "ssd" if enabled else "official"
+    return True
+
+
 def install_prompt_scope_patch(provider) -> bool:
     """让「是否启用缓存」按工作流作用域生效。
 
@@ -213,10 +233,16 @@ def install_prompt_scope_patch(provider) -> bool:
     original = executor_cls.execute_async
 
     async def patched(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+        enabled = False
         try:
-            provider.begin_prompt(prompt)
+            enabled = provider.begin_prompt(prompt)
         except Exception as exc:  # noqa: BLE001 - 判定失败时不影响执行
             log.warning("SSD-Cache: 工作流作用域判定失败: %s", exc)
+        try:
+            # 没放 Enable 节点 -> 回到 ComfyUI 官方缓存；放了才用 SSD 层
+            apply_cache_scope(self, enabled, provider)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("SSD-Cache: 缓存层切换失败: %s", exc)
         return await original(self, prompt, prompt_id, extra_data, execute_outputs)
 
     executor_cls.execute_async = patched
@@ -246,10 +272,15 @@ def install_cache_override(provider) -> bool:
     def patched_init(self, cache_type=None, cache_args=None):
         original_init(self, cache_type, cache_args or {})
         try:
-            memory_cache = SSDMemoryCache(execution.CacheKeySetInputSignature, provider)
-            self.outputs = memory_cache
+            # 保留 ComfyUI 原版缓存实例：没有 Enable 节点的工作流继续用它
+            official = self.outputs
+            ssd = SSDMemoryCache(execution.CacheKeySetInputSignature, provider)
+            self._official_outputs = official
+            self._ssd_outputs = ssd
+            self.outputs = official
             self.all = [self.outputs, self.objects]
-            provider.attach_memory_cache(memory_cache)
+            provider.attach_memory_cache(ssd)
+            provider.active_cache_kind = "official"
         except Exception as exc:  # noqa: BLE001
             log.warning("SSD-Cache: 替换缓存层失败，沿用 ComfyUI 原实现: %s", exc)
 

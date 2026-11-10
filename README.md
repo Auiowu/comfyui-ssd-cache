@@ -31,7 +31,7 @@ ComfyUI 0.44 起内置了官方的外部缓存插件接口（`comfy_execution.ca
   官方源文件）：节点结果先进内存/显存，超过你设定的上限后按 LRU 淘汰；无论是否进内存，
   都会异步写入 SSD。读取顺序固定为 **内存/显存 → SSD → 真正计算**；
 - **按工作流生效**：每次运行开始时先检查图里有没有 `SSD Cache Enable` 节点，
-  没有就整个运行都不走缓存（不查询、不写入）；有才按该节点的参数启用。
+  没有就整条工作流使用 **ComfyUI 官方默认缓存**（不读写 SSD）；有才切到 SSD 缓存层。
 
 缓存目录结构（按 hash 前 4 位分两级，避免单目录文件过多）：
 
@@ -69,12 +69,13 @@ SSD-Cache: HTTP API 已注册
 
 ## 节点
 
-### 1. SSD Cache Enable（UNet 后）
+### 1. SSD Cache Enable（可放任意位置）
 
-放在 **UNet / Checkpoint 加载节点之后**，把 MODEL 透传出去。
+**接任意节点的输出、原样透传**，可以放在工作流任意位置——不限于 UNet 之后。
 
 | 参数 | 说明 |
 | --- | --- |
+| `value` | 接任意类型的数据（`*`），原样透传。可接 MODEL、LATENT、IMAGE、CONDITIONING… |
 | `cache_dir` | 缓存目录，默认 `D:\ssd-cache`，不存在会自动创建 |
 | `enable` | 是否启用，默认开 |
 | `max_entry_mb` | 单条缓存大小上限（MB），`0` = 不限 |
@@ -87,10 +88,15 @@ SSD-Cache: HTTP API 已注册
 
 ```
 Load Checkpoint ──MODEL──▶ SSD Cache Enable ──MODEL──▶ KSampler ──▶ …
+EmptyLatentImage ─LATENT─▶ SSD Cache Enable ─LATENT─▶ KSampler ──▶ …
 ```
 
-启用状态和目录会写入插件目录下的 `config.json`，因此 ComfyUI 重启后、在这个节点
-执行之前，命中查询就已经生效（ComfyUI 在 prompt 开始时会批量预取缓存）。
+> **没放这个节点的工作流，使用 ComfyUI 官方默认缓存机制**（`--cache-type` 决定的
+> RAMPressure / LRU / Classic 原样工作），不会读写 SSD。
+> 放了才整条工作流切到 SSD 缓存层。
+
+启用状态和目录会写入插件目录下的 `config.json`；每次运行开始时插件会先读取本工作流里
+Enable 节点的参数再决定缓存层，所以预取阶段就能按正确的开关和目录工作。
 
 ### 2. SSD Cache Stats（命中率）
 
@@ -169,7 +175,7 @@ SSD-Cache: 已启用
 ```
 
 - **是否启用由每个工作流的图里是否包含 Enable 节点决定**：没放 `SSD Cache Enable` 的工作流
-  完全不走缓存——既不查询 SSD 也不写盘，即使这里 `enabled` 是 `true`。
+  使用 **ComfyUI 官方默认缓存机制**，不查询 SSD 也不写盘，即使这里 `enabled` 是 `true`。
   （`enabled` 只在节点输入是链接、无法静态求值时作为回退值。）
 - 想彻底关掉，把 Enable 节点的 `enable` 取消勾选并运行一次，或手动改这里为 `false` 后重启。
 - `memory_cache_mb` 是**插件接管缓存层后的唯一内存上限**：设置后 ComfyUI 自带的

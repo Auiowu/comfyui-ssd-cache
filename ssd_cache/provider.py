@@ -106,6 +106,8 @@ class SSDCacheProvider(CacheProvider):
         #: 内存/显存缓存上限（字节），0 = 不限
         self.memory_cache_max_bytes: int = max(0, int(self.config.memory_cache_mb)) * 1024 * 1024
         self._memory_cache = None
+        #: 当前生效的缓存层：``ssd`` 或 ``official``
+        self.active_cache_kind = "official"
 
         self.session = CacheStats()
         self.total = CacheStats()
@@ -221,9 +223,20 @@ class SSDCacheProvider(CacheProvider):
         return enabled
 
     def memory_stats(self) -> Dict[str, Any]:
+        if getattr(self, "active_cache_kind", "official") == "official":
+            return {
+                "kind": "official",
+                "enabled": True,
+                "bytes": 0,
+                "bytes_human": "0 B",
+                "entries": 0,
+                "limit_bytes": 0,
+                "limit_human": "官方默认",
+            }
         cache = self._memory_cache
         if cache is None:
             return {
+                "kind": "ssd",
                 "enabled": self.memory_cache_enabled,
                 "bytes": 0,
                 "bytes_human": "0 B",
@@ -232,6 +245,7 @@ class SSDCacheProvider(CacheProvider):
                 "limit_human": "不限" if self.memory_cache_max_bytes == 0 else format_bytes(self.memory_cache_max_bytes),
             }
         return {
+            "kind": "ssd",
             "enabled": self.memory_cache_enabled,
             "bytes": cache.memory_bytes,
             "bytes_human": format_bytes(cache.memory_bytes),
@@ -614,7 +628,9 @@ class SSDCacheProvider(CacheProvider):
         lines.append(f"磁盘: {disk['bytes_human']} · {disk['entries']} 条 | 目录: {snap['cache_dir']}")
 
         memory = snap.get("memory") or {}
-        if memory.get("enabled"):
+        if memory.get("kind") == "official":
+            lines.append("内存/显存: ComfyUI 官方默认缓存（本工作流未放 Enable 节点）")
+        elif memory.get("enabled"):
             lines.append(
                 f"内存/显存: {memory.get('bytes_human', '0 B')} / "
                 f"{memory.get('limit_human', '不限')} · {memory.get('entries', 0)} 条"
