@@ -170,6 +170,56 @@ class SSDCacheProvider(CacheProvider):
         """由缓存层 patch 回调，保存当前内存缓存实例用于统计。"""
         self._memory_cache = cache
 
+    # -------------------------------------------------------------- 工作流作用域
+    ENABLE_NODE_TYPE = "SSDCacheEnable"
+
+    def begin_prompt(self, prompt) -> bool:
+        """每次运行开始前调用：只有工作流里放了 Enable 节点才启用缓存。
+
+        返回本次是否启用。这里只调整运行时状态，不写 config.json ——
+        持久化配置由 Enable 节点执行时负责。
+        """
+        node = None
+        if isinstance(prompt, dict):
+            for item in prompt.values():
+                if isinstance(item, dict) and item.get("class_type") == self.ENABLE_NODE_TYPE:
+                    node = item
+                    break
+
+        if node is None:
+            self.enabled = False
+            log.debug("SSD-Cache: 本次工作流未包含 Enable 节点，缓存已禁用")
+            return False
+
+        inputs = node.get("inputs") or {}
+
+        enabled = inputs.get("enable")
+        if not isinstance(enabled, bool):
+            # 输入是链接时无法静态求值，回退到持久化配置
+            enabled = bool(self.config.enabled)
+
+        cache_dir = inputs.get("cache_dir")
+        if isinstance(cache_dir, str) and cache_dir.strip():
+            try:
+                self.store.set_dir(cache_dir)
+            except OSError as exc:
+                log.warning("SSD-Cache: 无法切换到缓存目录 %s: %s", cache_dir, exc)
+
+        max_entry_mb = inputs.get("max_entry_mb")
+        if isinstance(max_entry_mb, (int, float)):
+            self.max_entry_bytes = max(0, int(max_entry_mb)) * 1024 * 1024
+
+        memory_cache = inputs.get("memory_cache")
+        if isinstance(memory_cache, bool):
+            self.memory_cache_enabled = memory_cache
+
+        memory_cache_mb = inputs.get("memory_cache_mb")
+        if isinstance(memory_cache_mb, (int, float)):
+            self.memory_cache_max_bytes = max(0, int(memory_cache_mb)) * 1024 * 1024
+
+        self.enabled = enabled
+        return enabled
+
     def memory_stats(self) -> Dict[str, Any]:
         cache = self._memory_cache
         if cache is None:
